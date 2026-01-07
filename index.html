@@ -1,0 +1,410 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, collection, doc, setDoc, 
+  onSnapshot, query, addDoc, updateDoc, deleteDoc 
+} from 'firebase/firestore';
+import { 
+  getAuth, signInWithPopup, GoogleAuthProvider, 
+  onAuthStateChanged, signOut, signInWithCustomToken 
+} from 'firebase/auth';
+import { 
+  Users, ClipboardCheck, FileText, Plus, Trash2, 
+  CheckCircle2, Calendar, Edit2, Check, X, 
+  SortAsc, Printer, FileSpreadsheet, Loader2, LogOut, LogIn
+} from 'lucide-react';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const googleProvider = new GoogleAuthProvider();
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'presensi-madrasah-pro';
+
+const App = () => {
+  const [user, setUser] = useState(null);
+  const [activeTab, setActiveTab] = useState('input-siswa');
+  const [classes, setClasses] = useState([]); 
+  const [attendanceRecords, setAttendanceRecords] = useState([]); 
+  const [loading, setLoading] = useState(true);
+  
+  // UI States
+  const [newClassName, setNewClassName] = useState('');
+  const [newStudentName, setNewStudentName] = useState('');
+  const [selectedClassId, setSelectedClassId] = useState('');
+  const [attendanceDate, setAttendanceDate] = useState(new Date().toISOString().split('T')[0]);
+  const [rekapMonth, setRekapMonth] = useState(new Date().getMonth());
+  const [rekapYear, setRekapYear] = useState(new Date().getFullYear());
+
+  const months = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+
+  // 1. Inisialisasi Auth & Library
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        }
+      } catch (err) {
+        console.error("Auth init error:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+
+    // Load XLSX Library
+    const script = document.createElement('script');
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    script.async = true;
+    document.body.appendChild(script);
+
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Sinkronisasi Data Berdasarkan User ID (Private Data)
+  useEffect(() => {
+    if (!user) {
+      setClasses([]);
+      setAttendanceRecords([]);
+      return;
+    }
+
+    // Path Koleksi: /artifacts/{appId}/users/{userId}/classes
+    const qClasses = collection(db, 'artifacts', appId, 'users', user.uid, 'classes');
+    const unsubClasses = onSnapshot(qClasses, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setClasses(data);
+    }, (err) => console.error("Firestore error:", err));
+
+    const qAttendance = collection(db, 'artifacts', appId, 'users', user.uid, 'attendance');
+    const unsubAttend = onSnapshot(qAttendance, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setAttendanceRecords(data);
+    });
+
+    return () => {
+      unsubClasses();
+      unsubAttend();
+    };
+  }, [user]);
+
+  // --- Auth Actions ---
+  const handleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      console.error("Login failed:", err);
+    }
+  };
+
+  const handleLogout = () => signOut(auth);
+
+  // --- Firestore Actions ---
+  const sortStudents = (students) => [...students].sort((a, b) => a.name.localeCompare(b.name));
+
+  const addClass = async () => {
+    if (!newClassName.trim() || !user) return;
+    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'classes'), {
+      name: newClassName,
+      students: [],
+      createdAt: new Date().toISOString()
+    });
+    setNewClassName('');
+  };
+
+  const deleteClass = async (id) => {
+    if (!user) return;
+    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'classes', id));
+  };
+
+  const addStudent = async (classId) => {
+    if (!newStudentName.trim() || !user) return;
+    const target = classes.find(c => c.id === classId);
+    const updated = sortStudents([...target.students, { id: Date.now().toString(), name: newStudentName }]);
+    await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'classes', classId), { students: updated });
+    setNewStudentName('');
+  };
+
+  const handleImportExcel = (e, classId) => {
+    const file = e.target.files[0];
+    if (!file || !user) return;
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      const bstr = evt.target.result;
+      const wb = window.XLSX.read(bstr, { type: 'binary' });
+      const data = window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+      const importedNames = data.map(row => row[0]).filter(n => n && typeof n === 'string' && n.toLowerCase() !== 'nama');
+      
+      const target = classes.find(c => c.id === classId);
+      const newStudents = importedNames.map(name => ({ id: Math.random().toString(36).substr(2, 9), name: name.trim() }));
+      const combined = sortStudents([...target.students, ...newStudents]);
+      await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'classes', classId), { students: combined });
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  const saveAttendance = async (classId, date, status) => {
+    if (!user) return;
+    const recordId = `${classId}-${date}`;
+    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'attendance', recordId), {
+      date, classId, status, updatedAt: new Date().toISOString()
+    });
+  };
+
+  // --- Loading State ---
+  if (loading) return <div className="h-screen flex flex-col items-center justify-center bg-slate-50"><Loader2 className="animate-spin text-blue-600 mb-2" size={40} /><p className="text-slate-500 font-medium">Memuat Aplikasi...</p></div>;
+
+  // --- Welcome Screen ---
+  if (!user) return (
+    <div className="h-screen flex items-center justify-center bg-slate-50 p-4">
+      <div className="max-w-md w-full bg-white p-8 rounded-3xl shadow-xl border border-slate-100 text-center">
+        <div className="w-20 h-20 bg-blue-100 rounded-2xl flex items-center justify-center mx-auto mb-6 text-blue-600">
+          <ClipboardCheck size={40} />
+        </div>
+        <h1 className="text-2xl font-black text-slate-800 mb-2">Presensi Madrasah Pro</h1>
+        <p className="text-slate-500 mb-8">Simpan data presensi siswa Anda di cloud dan akses dari perangkat mana saja dengan aman.</p>
+        <button 
+          onClick={handleLogin}
+          className="w-full flex items-center justify-center gap-3 bg-white border border-slate-200 p-4 rounded-xl font-bold hover:bg-slate-50 transition-all shadow-sm"
+        >
+          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/pwa_google_main_logo.svg" className="w-5" alt="Google" />
+          Masuk dengan Google
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans print:bg-white print:p-0">
+      <div className="max-w-6xl mx-auto">
+        {/* Header */}
+        <header className="mb-8 flex flex-col md:flex-row items-center justify-between gap-4 no-print">
+          <div className="flex items-center gap-3">
+             <div className="bg-blue-600 p-2 rounded-lg text-white"><ClipboardCheck size={24}/></div>
+             <div>
+               <h1 className="text-xl font-black text-slate-800 tracking-tight leading-none uppercase">Presensi Digital</h1>
+               <span className="text-xs text-slate-400 font-medium">{user.email}</span>
+             </div>
+          </div>
+          
+          <div className="flex bg-white p-1 rounded-xl shadow-sm border border-slate-200">
+            {[
+              { id: 'input-siswa', label: 'Siswa', icon: <Users size={16}/> },
+              { id: 'input-hadir', label: 'Absen', icon: <ClipboardCheck size={16}/> },
+              { id: 'rekap', label: 'Rekap', icon: <FileText size={16}/> }
+            ].map((tab) => (
+              <button 
+                key={tab.id} onClick={() => setActiveTab(tab.id)} 
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}
+              >
+                {tab.icon} {tab.label}
+              </button>
+            ))}
+            <button onClick={handleLogout} className="ml-2 p-2 text-slate-300 hover:text-red-500 transition-colors" title="Logout"><LogOut size={18}/></button>
+          </div>
+        </header>
+
+        <main>
+          {/* TAB DATA SISWA */}
+          {activeTab === 'input-siswa' && (
+            <div className="space-y-6 animate-in fade-in zoom-in duration-300">
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2"><Plus className="text-blue-600" size={18}/> Tambah Kelas Baru</h3>
+                <div className="flex gap-2">
+                  <input type="text" placeholder="Contoh: 10-IPA-1" value={newClassName} onChange={(e) => setNewClassName(e.target.value)} className="flex-1 p-3 bg-slate-50 border-none rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-medium" />
+                  <button onClick={addClass} className="bg-blue-600 text-white px-6 rounded-xl font-bold hover:bg-blue-700">Buat Kelas</button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {classes.map(cls => (
+                  <div key={cls.id} className="bg-white rounded-2xl shadow-sm border border-slate-100 flex flex-col h-full overflow-hidden hover:shadow-md transition-all">
+                    <div className="bg-slate-50 p-4 flex justify-between items-center border-b">
+                      <h4 className="font-black text-slate-700 uppercase tracking-wider">{cls.name}</h4>
+                      <div className="flex gap-1">
+                        <label className="cursor-pointer text-slate-400 hover:text-green-600 p-2" title="Impor dari Excel">
+                          <FileSpreadsheet size={18}/><input type="file" className="hidden" accept=".xlsx, .xls" onChange={(e) => handleImportExcel(e, cls.id)} />
+                        </label>
+                        <button onClick={() => deleteClass(cls.id)} className="text-slate-300 hover:text-red-500 p-2"><Trash2 size={18}/></button>
+                      </div>
+                    </div>
+                    <div className="p-4 flex-1 overflow-y-auto max-h-60 custom-scrollbar space-y-2">
+                      {cls.students.length === 0 ? <p className="text-center text-slate-300 text-sm py-8">Belum ada siswa</p> : 
+                        cls.students.map((st, idx) => (
+                          <div key={st.id} className="flex items-center gap-2 bg-slate-50/50 p-2 rounded-lg group">
+                            <span className="text-[10px] font-black text-blue-300 w-4">{idx+1}</span>
+                            <span className="flex-1 text-sm font-semibold text-slate-600">{st.name}</span>
+                            <button onClick={() => {
+                              const updated = cls.students.filter(s => s.id !== st.id);
+                              updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'classes', cls.id), { students: updated });
+                            }} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition-all"><X size={14}/></button>
+                          </div>
+                        ))
+                      }
+                    </div>
+                    <div className="p-4 bg-white border-t">
+                      <div className="flex gap-2">
+                        <input type="text" placeholder="Nama Siswa" value={selectedClassId === cls.id ? newStudentName : ''} onChange={(e) => { setSelectedClassId(cls.id); setNewStudentName(e.target.value); }} className="flex-1 p-2 text-sm bg-slate-50 rounded-lg outline-none" onKeyPress={(e) => e.key === 'Enter' && addStudent(cls.id)}/>
+                        <button onClick={() => addStudent(cls.id)} className="bg-slate-800 text-white p-2 rounded-lg hover:bg-black"><Plus size={16}/></button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* TAB ABSENSI */}
+          {activeTab === 'input-hadir' && (
+            <div className="space-y-6 no-print animate-in fade-in duration-300">
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1 ml-1">Tanggal Presensi</label>
+                  <input type="date" value={attendanceDate} onChange={(e) => setAttendanceDate(e.target.value)} className="w-full p-3 bg-slate-50 border-none rounded-xl focus:ring-2 focus:ring-blue-500 outline-none" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1 ml-1">Pilih Kelas</label>
+                  <select value={selectedClassId} onChange={(e) => setSelectedClassId(e.target.value)} className="w-full p-3 bg-slate-50 border-none rounded-xl focus:ring-2 focus:ring-blue-500 outline-none">
+                    <option value="">-- Pilih Kelas --</option>
+                    {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {selectedClassId && classes.find(c => c.id === selectedClassId) ? (
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+                  <div className="p-4 bg-slate-50 border-b flex justify-between items-center">
+                    <h3 className="font-bold text-slate-700">Daftar Hadir: {classes.find(c => c.id === selectedClassId).name}</h3>
+                    <div className="text-[10px] bg-blue-100 text-blue-600 px-2 py-1 rounded-full font-bold">MODE CLOUD SINKRON</div>
+                  </div>
+                  <table className="w-full text-left">
+                    <thead><tr className="border-b bg-white text-[10px] uppercase text-slate-400"><th className="p-4 font-black">Nama Siswa</th><th className="p-4 font-black text-center">Kehadiran (S/I/A)</th></tr></thead>
+                    <tbody>
+                      {classes.find(c => c.id === selectedClassId).students.map(student => {
+                        const currentRecord = attendanceRecords.find(r => r.id === `${selectedClassId}-${attendanceDate}`);
+                        const currentStatus = currentRecord?.status[student.id];
+                        return (
+                          <tr key={student.id} className="border-b hover:bg-slate-50/50 transition-colors">
+                            <td className="p-4 font-semibold text-slate-700">{student.name}</td>
+                            <td className="p-4">
+                              <div className="flex justify-center gap-3">
+                                {['S', 'I', 'A'].map(type => (
+                                  <button 
+                                    key={type} 
+                                    onClick={() => {
+                                      const newStatus = { ...(currentRecord?.status || {}), [student.id]: currentStatus === type ? null : type };
+                                      saveAttendance(selectedClassId, attendanceDate, newStatus);
+                                    }} 
+                                    className={`w-10 h-10 rounded-xl border-2 font-black transition-all ${currentStatus === type ? 'bg-blue-600 border-blue-600 text-white shadow-lg scale-110' : 'border-slate-100 text-slate-300 hover:border-blue-200'}`}
+                                  >
+                                    {type}
+                                  </button>
+                                ))}
+                                {!currentStatus && <span className="flex items-center text-[10px] font-black text-green-500 ml-2 tracking-tighter">HADIR</span>}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  <div className="p-6 bg-slate-50 flex justify-end">
+                    <button onClick={() => setActiveTab('rekap')} className="bg-blue-600 text-white px-8 py-3 rounded-xl font-bold hover:shadow-lg transition-all">Selesai & Lihat Rekap</button>
+                  </div>
+                </div>
+              ) : <div className="text-center py-20 bg-white rounded-2xl border-2 border-dashed border-slate-200 text-slate-400 font-medium italic">Silahkan pilih kelas untuk memulai presensi</div>}
+            </div>
+          )}
+
+          {/* TAB REKAPITULASI */}
+          {activeTab === 'rekap' && (
+            <div className="space-y-4 animate-in fade-in duration-300">
+              <div className="flex flex-wrap gap-4 items-center bg-white p-4 rounded-2xl shadow-sm border border-slate-100 no-print">
+                <select value={selectedClassId} onChange={(e) => setSelectedClassId(e.target.value)} className="p-2 bg-slate-50 border-none rounded-lg font-bold text-slate-700">
+                  <option value="">-- Pilih Kelas --</option>
+                  {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <select value={rekapMonth} onChange={(e) => setRekapMonth(e.target.value)} className="p-2 bg-slate-50 border-none rounded-lg font-bold text-slate-700">{months.map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
+                <select value={rekapYear} onChange={(e) => setRekapYear(e.target.value)} className="p-2 bg-slate-50 border-none rounded-lg font-bold text-slate-700">{[2026, 2027, 2028, 2029, 2030].map(y => <option key={y} value={y}>{y}</option>)}</select>
+                <button onClick={() => window.print()} className="ml-auto bg-slate-800 text-white px-5 py-2 rounded-xl flex items-center gap-2 font-bold hover:bg-black transition-all"><Printer size={18}/> Cetak Laporan</button>
+              </div>
+
+              {selectedClassId && classes.find(c => c.id === selectedClassId) ? (
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-x-auto print:shadow-none print:border-none">
+                  <div className="print-only text-center mb-10 border-b-4 border-double border-black pb-4">
+                    <h1 className="text-2xl font-black uppercase tracking-tight">Laporan Presensi Siswa Bulanan</h1>
+                    <h2 className="text-lg font-bold">Tahun Pelajaran {rekapYear}/{parseInt(rekapYear)+1}</h2>
+                    <div className="mt-4 flex justify-between px-10 text-sm font-bold">
+                       <span>Kelas: {classes.find(c => c.id === selectedClassId).name}</span>
+                       <span>Bulan: {months[rekapMonth]} {rekapYear}</span>
+                    </div>
+                  </div>
+                  
+                  <table className="w-full text-[10px] md:text-sm border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 print:bg-white text-slate-500 uppercase font-black text-[10px]">
+                        <th className="p-3 border text-left sticky left-0 bg-slate-50 print:bg-white z-10 min-w-[150px]">Nama Lengkap Siswa</th>
+                        {attendanceRecords.filter(r => {
+                          const d = new Date(r.date);
+                          return r.classId === selectedClassId && d.getMonth() === parseInt(rekapMonth) && d.getFullYear() === parseInt(rekapYear);
+                        }).sort((a,b) => new Date(a.date) - new Date(b.date)).map(r => (
+                          <th key={r.id} className="p-1 border text-center font-bold min-w-[25px]">{new Date(r.date).getDate()}</th>
+                        ))}
+                        <th className="p-2 border text-center bg-orange-50 text-orange-600 print:bg-white font-black">S</th>
+                        <th className="p-2 border text-center bg-blue-50 text-blue-600 print:bg-white font-black">I</th>
+                        <th className="p-2 border text-center bg-red-50 text-red-600 print:bg-white font-black">A</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {classes.find(c => c.id === selectedClassId).students.map(student => {
+                        let sCount = 0, iCount = 0, aCount = 0;
+                        const filteredRecords = attendanceRecords.filter(r => {
+                          const d = new Date(r.date);
+                          return r.classId === selectedClassId && d.getMonth() === parseInt(rekapMonth) && d.getFullYear() === parseInt(rekapYear);
+                        }).sort((a,b) => new Date(a.date) - new Date(b.date));
+
+                        return (
+                          <tr key={student.id} className="hover:bg-slate-50 transition-colors">
+                            <td className="p-3 border font-bold text-slate-700 sticky left-0 bg-white z-10">{student.name}</td>
+                            {filteredRecords.map(r => {
+                              const stat = r.status[student.id];
+                              if (stat === 'S') sCount++; else if (stat === 'I') iCount++; else if (stat === 'A') aCount++;
+                              return <td key={r.id} className={`p-1 border text-center font-black ${!stat ? 'text-green-500' : stat === 'A' ? 'text-red-500' : 'text-slate-400'}`}>{stat || 'H'}</td>;
+                            })}
+                            <td className="p-2 border text-center font-black text-orange-600">{sCount || '-'}</td>
+                            <td className="p-2 border text-center font-black text-blue-600">{iCount || '-'}</td>
+                            <td className="p-2 border text-center font-black text-red-600">{aCount || '-'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+
+                  <div className="print-only mt-12 grid grid-cols-2 text-center text-sm gap-20 px-10">
+                    <div><p>Mengetahui,</p><p className="font-bold">Kepala Madrasah</p><div className="h-16"></div><p className="font-bold underline">H. Fulan Bin Fulan, M.Pd</p><p>NIP. 19700101 199003 1 001</p></div>
+                    <div><p>Admin, {new Date().toLocaleDateString('id-ID', {day: 'numeric', month: 'long', year: 'numeric'})}</p><p className="font-bold">Guru Mata Pelajaran</p><div className="h-16"></div><p className="font-bold underline">_________________________</p><p>NIP/NUPTK. ..........................</p></div>
+                  </div>
+                </div>
+              ) : <div className="p-20 text-center bg-white rounded-2xl border-2 border-dashed border-slate-200 text-slate-400">Pilih kelas untuk melihat rekapitulasi.</div>}
+            </div>
+          )}
+        </main>
+      </div>
+
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+        @media print { .no-print { display: none !important; } .print-only { display: block !important; } @page { size: landscape; margin: 1cm; } }
+        .print-only { display: none; }
+      `}</style>
+    </div>
+  );
+};
+
+export default App;
