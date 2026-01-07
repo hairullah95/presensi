@@ -18,7 +18,7 @@
     <!-- Babel for JSX -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    <!-- Firebase SDK Compat (Versi yang stabil untuk penggunaan langsung di HTML) -->
+    <!-- Firebase SDK Compat -->
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
@@ -36,7 +36,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useMemo } = React;
 
         // --- Firebase Configuration ---
         const firebaseConfig = {
@@ -49,8 +49,10 @@
             measurementId: "G-FTFKJGVFM1"
         };
 
-        // Initialize Firebase (Compat mode)
-        firebase.initializeApp(firebaseConfig);
+        // Initialize Firebase
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
         const auth = firebase.auth();
         const db = firebase.firestore();
         const googleProvider = new firebase.auth.GoogleAuthProvider();
@@ -72,6 +74,7 @@
             const [rekapYear, setRekapYear] = useState(new Date().getFullYear());
 
             const months = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+            const years = Array.from({length: 5}, (_, i) => new Date().getFullYear() - 2 + i);
 
             useEffect(() => {
                 const unsubscribe = auth.onAuthStateChanged((currentUser) => {
@@ -88,25 +91,22 @@
                     return;
                 }
 
-                // Firestore Listener untuk Kelas
                 const unsubClasses = db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes')
                     .onSnapshot((snapshot) => {
                         setClasses(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-                    });
+                    }, (err) => console.error(err));
 
-                // Firestore Listener untuk Absensi
                 const unsubAttend = db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('attendance')
                     .onSnapshot((snapshot) => {
                         setAttendanceRecords(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-                    });
+                    }, (err) => console.error(err));
 
                 return () => { unsubClasses(); unsubAttend(); };
             }, [user]);
 
             useEffect(() => {
-                // Inisialisasi Lucide icons setiap kali tab berubah
                 if (window.lucide) window.lucide.createIcons();
-            }, [activeTab, user, loading]);
+            }, [activeTab, user, loading, selectedClassId]);
 
             const handleLogin = async () => {
                 try { await auth.signInWithPopup(googleProvider); } 
@@ -141,6 +141,34 @@
                 await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('attendance').doc(`${classId}-${date}`).set({
                     date, classId, status, updatedAt: new Date().toISOString()
                 });
+            };
+
+            const exportToExcel = () => {
+                const currentClass = classes.find(c => c.id === selectedClassId);
+                if (!currentClass) return;
+
+                const data = currentClass.students.map(s => {
+                    let sCount = 0, iCount = 0, aCount = 0, hCount = 0;
+                    attendanceRecords
+                        .filter(r => r.classId === selectedClassId && new Date(r.date).getMonth() === parseInt(rekapMonth) && new Date(r.date).getFullYear() === parseInt(rekapYear))
+                        .forEach(r => {
+                            const stat = r.status?.[s.id];
+                            if(stat === 'S') sCount++; else if(stat === 'I') iCount++; else if(stat === 'A') aCount++; else hCount++;
+                        });
+                    
+                    return {
+                        "Nama Siswa": s.name,
+                        "Sakit": sCount,
+                        "Izin": iCount,
+                        "Alfa": aCount,
+                        "Hadir": hCount
+                    };
+                });
+
+                const ws = XLSX.utils.json_to_sheet(data);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "Rekap Presensi");
+                XLSX.writeFile(wb, `Rekap_${currentClass.name}_${months[rekapMonth]}_${rekapYear}.xlsx`);
             };
 
             if (loading) return (
@@ -288,19 +316,28 @@
                         {activeTab === 'rekap' && (
                             <div className="space-y-4 animate-in fade-in duration-500">
                                 <div className="flex flex-wrap gap-4 items-center bg-white p-6 rounded-3xl border border-slate-100 shadow-sm no-print">
-                                    <div className="flex-1 flex gap-4">
-                                        <select value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold text-xs outline-none border border-transparent focus:border-blue-100 transition-all">
+                                    <div className="flex flex-wrap flex-1 gap-3">
+                                        <select value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold text-xs outline-none border border-transparent focus:border-blue-100 transition-all min-w-[150px]">
                                             <option value="">-- Pilih Kelas --</option>
                                             {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                                         </select>
+                                        <select value={rekapMonth} onChange={e => setRekapMonth(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold text-xs outline-none border border-transparent focus:border-blue-100 transition-all">
+                                            {months.map((m, i) => <option key={i} value={i}>{m}</option>)}
+                                        </select>
+                                        <select value={rekapYear} onChange={e => setRekapYear(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold text-xs outline-none border border-transparent focus:border-blue-100 transition-all">
+                                            {years.map(y => <option key={y} value={y}>{y}</option>)}
+                                        </select>
                                     </div>
-                                    <button onClick={() => window.print()} className="bg-slate-800 text-white px-6 py-3 rounded-2xl text-xs font-black flex items-center gap-2 hover:bg-black shadow-lg shadow-slate-100 active:scale-95 transition-all"><i data-lucide="printer" style={{width:16}}></i> CETAK LAPORAN</button>
+                                    <div className="flex gap-2">
+                                        <button onClick={exportToExcel} className="bg-green-600 text-white px-5 py-3 rounded-2xl text-xs font-black flex items-center gap-2 hover:bg-green-700 shadow-lg shadow-green-100 active:scale-95 transition-all"><i data-lucide="file-spreadsheet" style={{width:16}}></i> EXCEL</button>
+                                        <button onClick={() => window.print()} className="bg-slate-800 text-white px-5 py-3 rounded-2xl text-xs font-black flex items-center gap-2 hover:bg-black shadow-lg shadow-slate-100 active:scale-95 transition-all"><i data-lucide="printer" style={{width:16}}></i> CETAK</button>
+                                    </div>
                                 </div>
                                 {selectedClassId && (
                                     <div className="bg-white p-10 rounded-3xl border border-slate-100 shadow-sm overflow-x-auto">
                                         <div className="print-only text-center mb-12 border-b-2 border-slate-800 pb-6">
                                             <h1 className="text-3xl font-black uppercase tracking-tighter mb-1">Laporan Rekapitulasi Presensi</h1>
-                                            <p className="font-bold text-slate-600 tracking-widest uppercase text-sm">Kelas: {classes.find(c => c.id === selectedClassId)?.name} • Dicetak: {new Date().toLocaleDateString('id-ID')}</p>
+                                            <p className="font-bold text-slate-600 tracking-widest uppercase text-sm">Kelas: {classes.find(c => c.id === selectedClassId)?.name} • Periode: {months[rekapMonth]} {rekapYear}</p>
                                         </div>
                                         <table className="w-full text-xs border-collapse rounded-xl overflow-hidden">
                                             <thead>
@@ -315,11 +352,12 @@
                                             <tbody>
                                                 {classes.find(c => c.id === selectedClassId)?.students.map(s => {
                                                     let sCount = 0, iCount = 0, aCount = 0, hCount = 0;
-                                                    const records = attendanceRecords.filter(r => r.classId === selectedClassId);
-                                                    records.forEach(r => {
-                                                        const stat = r.status?.[s.id];
-                                                        if(stat === 'S') sCount++; else if(stat === 'I') iCount++; else if(stat === 'A') aCount++; else hCount++;
-                                                    });
+                                                    attendanceRecords
+                                                        .filter(r => r.classId === selectedClassId && new Date(r.date).getMonth() === parseInt(rekapMonth) && new Date(r.date).getFullYear() === parseInt(rekapYear))
+                                                        .forEach(r => {
+                                                            const stat = r.status?.[s.id];
+                                                            if(stat === 'S') sCount++; else if(stat === 'I') iCount++; else if(stat === 'A') aCount++; else hCount++;
+                                                        });
                                                     return (
                                                         <tr key={s.id} className="border-b hover:bg-slate-50 transition-colors">
                                                             <td className="p-4 font-bold text-slate-700">{s.name}</td>
