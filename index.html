@@ -29,7 +29,7 @@
         .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
         @media print { .no-print { display: none !important; } .print-only { display: block !important; } @page { size: landscape; margin: 1cm; } }
-        .print-only { display: none; }
+        .print-only { display: block !important; }
     </style>
 </head>
 <body class="bg-slate-50">
@@ -38,7 +38,6 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo } = React;
 
-        // --- Firebase Configuration ---
         const firebaseConfig = {
             apiKey: "AIzaSyAlXDVBSJryVlGwtZWYL_BNnh6-7R-SbXk",
             authDomain: "jurnal-guru-f06df.firebaseapp.com",
@@ -49,7 +48,6 @@
             measurementId: "G-FTFKJGVFM1"
         };
 
-        // Initialize Firebase
         if (!firebase.apps.length) {
             firebase.initializeApp(firebaseConfig);
         }
@@ -69,7 +67,9 @@
             const [newClassName, setNewClassName] = useState('');
             const [newStudentName, setNewStudentName] = useState('');
             const [selectedClassId, setSelectedClassId] = useState('');
+            const [editingStudent, setEditingStudent] = useState(null);
             const [attendanceDate, setAttendanceDate] = useState(new Date().toISOString().split('T')[0]);
+            const [currentAttendance, setCurrentAttendance] = useState({});
             const [rekapMonth, setRekapMonth] = useState(new Date().getMonth());
             const [rekapYear, setRekapYear] = useState(new Date().getFullYear());
 
@@ -85,35 +85,35 @@
             }, []);
 
             useEffect(() => {
-                if (!user) {
-                    setClasses([]);
-                    setAttendanceRecords([]);
-                    return;
-                }
+                if (!user) return;
 
                 const unsubClasses = db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes')
                     .onSnapshot((snapshot) => {
                         setClasses(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-                    }, (err) => console.error(err));
+                    });
 
                 const unsubAttend = db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('attendance')
                     .onSnapshot((snapshot) => {
                         setAttendanceRecords(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-                    }, (err) => console.error(err));
+                    });
 
                 return () => { unsubClasses(); unsubAttend(); };
             }, [user]);
 
             useEffect(() => {
                 if (window.lucide) window.lucide.createIcons();
-            }, [activeTab, user, loading, selectedClassId]);
+            }, [activeTab, user, loading, selectedClassId, editingStudent]);
+
+            // Load existing attendance into state when class/date changes
+            useEffect(() => {
+                const recordId = `${selectedClassId}-${attendanceDate}`;
+                const existing = attendanceRecords.find(r => r.id === recordId);
+                setCurrentAttendance(existing?.status || {});
+            }, [selectedClassId, attendanceDate, attendanceRecords]);
 
             const handleLogin = async () => {
-                try { await auth.signInWithPopup(googleProvider); } 
-                catch (err) { console.error("Login failed", err); }
+                try { await auth.signInWithPopup(googleProvider); } catch (err) { console.error(err); }
             };
-
-            const handleLogout = () => auth.signOut();
 
             const addClass = async () => {
                 if (!newClassName.trim() || !user) return;
@@ -123,136 +123,143 @@
                 setNewClassName('');
             };
 
+            const sortStudents = (students) => [...students].sort((a, b) => a.name.localeCompare(b.name));
+
             const addStudent = async (classId) => {
                 if (!newStudentName.trim() || !user) return;
                 const target = classes.find(c => c.id === classId);
-                const updated = [...target.students, { id: Date.now().toString(), name: newStudentName }].sort((a,b) => a.name.localeCompare(b.name));
+                const updated = sortStudents([...target.students, { id: Date.now().toString(), name: newStudentName }]);
                 await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(classId).update({ students: updated });
                 setNewStudentName('');
             };
 
-            const deleteClass = async (id) => {
-                if (!user) return;
-                await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(id).delete();
-            };
-
-            const saveAttendance = async (classId, date, status) => {
-                if (!user) return;
-                await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('attendance').doc(`${classId}-${date}`).set({
-                    date, classId, status, updatedAt: new Date().toISOString()
-                });
-            };
-
-            const exportToExcel = () => {
-                const currentClass = classes.find(c => c.id === selectedClassId);
-                if (!currentClass) return;
-
-                const data = currentClass.students.map(s => {
-                    let sCount = 0, iCount = 0, aCount = 0, hCount = 0;
-                    attendanceRecords
-                        .filter(r => r.classId === selectedClassId && new Date(r.date).getMonth() === parseInt(rekapMonth) && new Date(r.date).getFullYear() === parseInt(rekapYear))
-                        .forEach(r => {
-                            const stat = r.status?.[s.id];
-                            if(stat === 'S') sCount++; else if(stat === 'I') iCount++; else if(stat === 'A') aCount++; else hCount++;
-                        });
+            const importExcel = (e, classId) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = async (evt) => {
+                    const bstr = evt.target.result;
+                    const wb = XLSX.read(bstr, { type: 'binary' });
+                    const wsname = wb.SheetNames[0];
+                    const ws = wb.Sheets[wsname];
+                    const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
                     
-                    return {
-                        "Nama Siswa": s.name,
-                        "Sakit": sCount,
-                        "Izin": iCount,
-                        "Alfa": aCount,
-                        "Hadir": hCount
-                    };
-                });
-
-                const ws = XLSX.utils.json_to_sheet(data);
-                const wb = XLSX.utils.book_new();
-                XLSX.utils.book_append_sheet(wb, ws, "Rekap Presensi");
-                XLSX.writeFile(wb, `Rekap_${currentClass.name}_${months[rekapMonth]}_${rekapYear}.xlsx`);
+                    const newStudents = data.flat()
+                        .filter(name => name && typeof name === 'string')
+                        .map(name => ({ id: Math.random().toString(36).substr(2, 9), name: name.trim() }));
+                    
+                    const target = classes.find(c => c.id === classId);
+                    const updated = sortStudents([...target.students, ...newStudents]);
+                    await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(classId).update({ students: updated });
+                };
+                reader.readAsBinaryString(file);
+                e.target.value = null; // reset
             };
 
-            if (loading) return (
-                <div className="h-screen flex items-center justify-center bg-slate-50">
-                    <div className="flex flex-col items-center">
-                        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-                        <p className="text-slate-500 font-bold animate-pulse">Menghubungkan ke Cloud...</p>
-                    </div>
-                </div>
-            );
+            const saveEditedStudent = async (classId) => {
+                const target = classes.find(c => c.id === classId);
+                const updated = sortStudents(target.students.map(s => s.id === editingStudent.id ? { ...s, name: editingStudent.name } : s));
+                await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(classId).update({ students: updated });
+                setEditingStudent(null);
+            };
+
+            const handleSaveAttendance = async () => {
+                if (!selectedClassId || !attendanceDate || !user) return;
+                await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('attendance').doc(`${selectedClassId}-${attendanceDate}`).set({
+                    date: attendanceDate,
+                    classId: selectedClassId,
+                    status: currentAttendance,
+                    updatedAt: new Date().toISOString()
+                });
+                alert('Presensi berhasil disimpan!');
+            };
+
+            // Filter for Rekap
+            const filteredDates = useMemo(() => {
+                const dates = attendanceRecords
+                    .filter(r => r.classId === selectedClassId)
+                    .map(r => r.date)
+                    .filter(d => {
+                        const dateObj = new Date(d);
+                        return dateObj.getMonth() === parseInt(rekapMonth) && dateObj.getFullYear() === parseInt(rekapYear);
+                    });
+                return [...new Set(dates)].sort();
+            }, [attendanceRecords, selectedClassId, rekapMonth, rekapYear]);
+
+            if (loading) return <div className="h-screen flex items-center justify-center">Memuat...</div>;
 
             if (!user) return (
-                <div className="h-screen flex items-center justify-center p-4">
-                    <div className="max-w-md w-full bg-white p-10 rounded-3xl shadow-xl text-center border border-slate-100">
-                        <div className="w-20 h-20 bg-blue-100 rounded-2xl flex items-center justify-center mx-auto mb-6 text-blue-600">
-                            <i data-lucide="clipboard-check" style={{width: 40, height: 40}}></i>
-                        </div>
-                        <h1 className="text-3xl font-black mb-2 text-slate-800">Presensi Digital</h1>
-                        <p className="text-slate-500 mb-8 text-sm leading-relaxed">Kelola data kehadiran siswa dengan mudah. Seluruh data tersimpan aman di akun Google Anda.</p>
-                        <button onClick={handleLogin} className="w-full flex items-center justify-center gap-3 bg-white border border-slate-200 p-4 rounded-2xl font-bold hover:bg-slate-50 transition-all shadow-sm active:scale-95">
-                            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/pwa_google_main_logo.svg" className="w-6" alt="Google" />
-                            Masuk dengan Akun Google
-                        </button>
-                    </div>
+                <div className="h-screen flex items-center justify-center bg-slate-100 p-4">
+                    <button onClick={handleLogin} className="bg-white p-6 rounded-2xl shadow-lg font-bold flex items-center gap-3">
+                        <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/pwa_google_main_logo.svg" className="w-6" />
+                        Masuk dengan Google
+                    </button>
                 </div>
             );
 
             return (
-                <div className="min-h-screen p-4 md:p-8 print:p-0">
+                <div className="min-h-screen p-4 md:p-8">
                     <div className="max-w-6xl mx-auto">
-                        <header className="mb-8 flex flex-col md:flex-row items-center justify-between gap-4 no-print bg-white p-4 rounded-3xl border border-slate-100 shadow-sm">
-                            <div className="flex items-center gap-4">
-                                <div className="bg-blue-600 p-3 rounded-2xl text-white shadow-lg shadow-blue-200"><i data-lucide="check-square"></i></div>
-                                <div>
-                                    <h1 className="text-xl font-black uppercase tracking-tight text-slate-800 leading-none mb-1">Presensi Digital</h1>
-                                    <p className="text-xs text-slate-400 font-bold tracking-wide">{user.email}</p>
-                                </div>
-                            </div>
-                            <div className="flex bg-slate-50 p-1.5 rounded-2xl border items-center">
-                                <button onClick={() => setActiveTab('input-siswa')} className={`px-5 py-2.5 rounded-xl text-xs font-black transition-all ${activeTab === 'input-siswa' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>SISWA</button>
-                                <button onClick={() => setActiveTab('input-hadir')} className={`px-5 py-2.5 rounded-xl text-xs font-black transition-all ${activeTab === 'input-hadir' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>ABSEN</button>
-                                <button onClick={() => setActiveTab('rekap')} className={`px-5 py-2.5 rounded-xl text-xs font-black transition-all ${activeTab === 'rekap' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>REKAP</button>
-                                <button onClick={handleLogout} className="ml-2 px-3 text-slate-300 hover:text-red-500 transition-colors" title="Logout"><i data-lucide="log-out" style={{width:20}}></i></button>
+                        <header className="mb-8 flex flex-col md:flex-row items-center justify-between gap-4 no-print bg-white p-4 rounded-3xl shadow-sm border">
+                            <h1 className="text-xl font-black text-blue-600 uppercase">Presensi Digital</h1>
+                            <div className="flex bg-slate-100 p-1 rounded-2xl items-center text-xs font-bold">
+                                <button onClick={() => setActiveTab('input-siswa')} className={`px-4 py-2 rounded-xl ${activeTab === 'input-siswa' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>SISWA</button>
+                                <button onClick={() => setActiveTab('input-hadir')} className={`px-4 py-2 rounded-xl ${activeTab === 'input-hadir' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>ABSEN</button>
+                                <button onClick={() => setActiveTab('rekap')} className={`px-4 py-2 rounded-xl ${activeTab === 'rekap' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>REKAP</button>
+                                <button onClick={() => auth.signOut()} className="ml-2 p-2 text-slate-300 hover:text-red-500"><i data-lucide="log-out" style={{width:16}}></i></button>
                             </div>
                         </header>
 
                         {activeTab === 'input-siswa' && (
-                            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                                <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
-                                    <h3 className="font-black mb-6 flex items-center gap-3 text-slate-700 uppercase tracking-widest text-sm"><i data-lucide="plus-circle" className="text-blue-600" style={{width:18}}></i> Tambah Kelas Baru</h3>
-                                    <div className="flex gap-3">
-                                        <input type="text" placeholder="Nama Kelas (Contoh: 10-IPA-1)" value={newClassName} onChange={e => setNewClassName(e.target.value)} className="flex-1 p-4 bg-slate-50 rounded-2xl outline-none font-semibold focus:ring-2 focus:ring-blue-100 transition-all" />
-                                        <button onClick={addClass} className="bg-blue-600 text-white px-8 rounded-2xl font-black shadow-lg shadow-blue-100 hover:bg-blue-700 active:scale-95 transition-all">SIMPAN</button>
+                            <div className="space-y-6">
+                                <div className="bg-white p-6 rounded-3xl border shadow-sm">
+                                    <h2 className="text-sm font-black mb-4 uppercase tracking-widest text-slate-500">Tambah Kelas</h2>
+                                    <div className="flex gap-2">
+                                        <input type="text" placeholder="Nama Kelas..." value={newClassName} onChange={e => setNewClassName(e.target.value)} className="flex-1 p-3 bg-slate-50 rounded-xl outline-none font-bold" />
+                                        <button onClick={addClass} className="bg-blue-600 text-white px-6 rounded-xl font-bold">SIMPAN</button>
                                     </div>
                                 </div>
-                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     {classes.map(cls => (
-                                        <div key={cls.id} className="bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden flex flex-col hover:shadow-md transition-all">
-                                            <div className="bg-slate-50/50 p-5 border-b flex justify-between items-center">
-                                                <span className="font-black text-slate-700 uppercase tracking-wider">{cls.name}</span>
-                                                <button onClick={() => deleteClass(cls.id)} className="text-slate-300 hover:text-red-500 p-2"><i data-lucide="trash-2" style={{width:18}}></i></button>
+                                        <div key={cls.id} className="bg-white rounded-3xl border shadow-sm overflow-hidden flex flex-col">
+                                            <div className="p-4 bg-slate-50 border-b flex justify-between items-center">
+                                                <span className="font-black text-slate-700">{cls.name}</span>
+                                                <div className="flex gap-2">
+                                                    <label className="cursor-pointer bg-green-50 text-green-600 p-2 rounded-lg hover:bg-green-100 transition-colors" title="Impor Excel">
+                                                        <i data-lucide="file-up" style={{width:16}}></i>
+                                                        <input type="file" accept=".xlsx, .xls" className="hidden" onChange={(e) => importExcel(e, cls.id)} />
+                                                    </label>
+                                                    <button onClick={() => db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(cls.id).delete()} className="text-slate-300 hover:text-red-500"><i data-lucide="trash-2" style={{width:16}}></i></button>
+                                                </div>
                                             </div>
-                                            <div className="p-5 flex-1 max-h-64 overflow-y-auto custom-scrollbar">
-                                                {cls.students.length === 0 ? (
-                                                    <div className="text-center py-8 text-slate-300 italic text-sm">Belum ada siswa</div>
-                                                ) : cls.students.map((s, i) => (
-                                                    <div key={s.id} className="flex items-center gap-3 text-sm py-2 group border-b border-slate-50 last:border-0">
-                                                        <span className="w-5 text-[10px] font-black text-blue-300">{i+1}</span>
-                                                        <span className="flex-1 font-bold text-slate-600">{s.name}</span>
-                                                        <button 
-                                                            onClick={async () => {
-                                                                const updated = cls.students.filter(std => std.id !== s.id);
-                                                                await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(cls.id).update({ students: updated });
-                                                            }}
-                                                            className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition-all"
-                                                        >
-                                                            <i data-lucide="x" style={{width:14}}></i>
-                                                        </button>
+                                            <div className="p-4 flex-1 max-h-60 overflow-y-auto custom-scrollbar space-y-1">
+                                                {cls.students.map((s, idx) => (
+                                                    <div key={s.id} className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg group">
+                                                        <span className="text-[10px] font-bold text-slate-300 w-4">{idx + 1}</span>
+                                                        {editingStudent?.id === s.id ? (
+                                                            <div className="flex-1 flex gap-2">
+                                                                <input autoFocus className="flex-1 border-b border-blue-500 outline-none text-sm font-bold" value={editingStudent.name} onChange={e => setEditingStudent({...editingStudent, name: e.target.value})} onKeyPress={e => e.key === 'Enter' && saveEditedStudent(cls.id)} />
+                                                                <button onClick={() => saveEditedStudent(cls.id)} className="text-green-500"><i data-lucide="check" style={{width:14}}></i></button>
+                                                            </div>
+                                                        ) : (
+                                                            <>
+                                                                <span className="flex-1 text-sm font-bold text-slate-600">{s.name}</span>
+                                                                <div className="opacity-0 group-hover:opacity-100 flex gap-2">
+                                                                    <button onClick={() => setEditingStudent(s)} className="text-slate-400 hover:text-blue-500"><i data-lucide="edit-2" style={{width:14}}></i></button>
+                                                                    <button onClick={async () => {
+                                                                        const updated = cls.students.filter(st => st.id !== s.id);
+                                                                        await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(cls.id).update({ students: updated });
+                                                                    }} className="text-slate-400 hover:text-red-500"><i data-lucide="x" style={{width:14}}></i></button>
+                                                                </div>
+                                                            </>
+                                                        )}
                                                     </div>
                                                 ))}
                                             </div>
-                                            <div className="p-5 border-t bg-slate-50/20 flex gap-2">
-                                                <input type="text" placeholder="Tambah Siswa..." value={selectedClassId === cls.id ? newStudentName : ''} onChange={e => {setSelectedClassId(cls.id); setNewStudentName(e.target.value)}} className="flex-1 text-xs p-3 bg-white border border-slate-100 rounded-xl outline-none font-semibold focus:ring-2 focus:ring-blue-100" onKeyPress={(e) => e.key === 'Enter' && addStudent(cls.id)}/>
-                                                <button onClick={() => addStudent(cls.id)} className="bg-slate-800 text-white p-3 rounded-xl hover:bg-black transition-colors"><i data-lucide="plus" style={{width:16}}></i></button>
+                                            <div className="p-4 border-t bg-slate-50/50 flex gap-2">
+                                                <input type="text" placeholder="Tambah Siswa Manual..." value={selectedClassId === cls.id ? newStudentName : ''} onChange={e => {setSelectedClassId(cls.id); setNewStudentName(e.target.value)}} className="flex-1 p-2 bg-white rounded-lg text-sm font-bold outline-none border" onKeyPress={e => e.key === 'Enter' && addStudent(cls.id)} />
+                                                <button onClick={() => addStudent(cls.id)} className="bg-slate-800 text-white p-2 rounded-lg"><i data-lucide="plus" style={{width:18}}></i></button>
                                             </div>
                                         </div>
                                     ))}
@@ -261,123 +268,128 @@
                         )}
 
                         {activeTab === 'input-hadir' && (
-                            <div className="space-y-6 animate-in fade-in duration-500">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
-                                    <div>
-                                        <label className="block text-[10px] font-black text-slate-400 uppercase mb-2 ml-1 tracking-widest">Tanggal</label>
-                                        <input type="date" value={attendanceDate} onChange={e => setAttendanceDate(e.target.value)} className="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold text-slate-700" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-[10px] font-black text-slate-400 uppercase mb-2 ml-1 tracking-widest">Kelas</label>
-                                        <select value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)} className="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold text-slate-700">
-                                            <option value="">-- Pilih Kelas --</option>
-                                            {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                        </select>
-                                    </div>
+                            <div className="space-y-6">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-white p-6 rounded-3xl border shadow-sm">
+                                    <input type="date" value={attendanceDate} onChange={e => setAttendanceDate(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold outline-none border focus:border-blue-200" />
+                                    <select value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold outline-none border focus:border-blue-200">
+                                        <option value="">-- Pilih Kelas --</option>
+                                        {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                    </select>
                                 </div>
+
                                 {selectedClassId && (
-                                    <div className="bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden">
-                                        <div className="p-6 bg-slate-50/50 border-b flex justify-between items-center">
-                                            <h3 className="font-black text-slate-700 uppercase tracking-widest text-xs">Daftar Presensi Siswa</h3>
-                                            <span className="text-[10px] bg-green-100 text-green-600 px-3 py-1 rounded-full font-black">OTOMATIS SIMPAN</span>
-                                        </div>
+                                    <div className="bg-white rounded-3xl border shadow-sm overflow-hidden">
                                         <table className="w-full text-left">
-                                            <thead className="bg-white text-[10px] uppercase font-black text-slate-300">
-                                                <tr><th className="p-6 border-b">Nama Siswa</th><th className="p-6 border-b text-center">Status Kehadiran</th></tr>
+                                            <thead>
+                                                <tr className="bg-slate-50 text-[10px] uppercase font-black text-slate-400">
+                                                    <th className="p-4 border-b">No</th>
+                                                    <th className="p-4 border-b">Nama Siswa</th>
+                                                    <th className="p-4 border-b text-center">Status</th>
+                                                </tr>
                                             </thead>
                                             <tbody>
-                                                {classes.find(c => c.id === selectedClassId)?.students.map(s => {
-                                                    const record = attendanceRecords.find(r => r.id === `${selectedClassId}-${attendanceDate}`);
-                                                    const status = record?.status?.[s.id];
-                                                    return (
-                                                        <tr key={s.id} className="border-b last:border-0 hover:bg-slate-50/30 transition-colors">
-                                                            <td className="p-6 font-bold text-slate-700">{s.name}</td>
-                                                            <td className="p-6">
-                                                                <div className="flex justify-center gap-3">
-                                                                    {['S', 'I', 'A'].map(v => (
-                                                                        <button key={v} onClick={() => {
-                                                                            const newStatus = {...(record?.status || {}), [s.id]: status === v ? null : v};
-                                                                            saveAttendance(selectedClassId, attendanceDate, newStatus);
-                                                                        }} className={`w-10 h-10 rounded-xl font-black border-2 transition-all flex items-center justify-center ${status === v ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-100 scale-110' : 'border-slate-100 text-slate-300 hover:border-blue-200'}`}>{v}</button>
-                                                                    ))}
-                                                                    {!status && <span className="text-[10px] text-green-500 font-black self-center ml-4 tracking-widest bg-green-50 px-3 py-1.5 rounded-lg border border-green-100">HADIR</span>}
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    )
-                                                })}
+                                                {classes.find(c => c.id === selectedClassId)?.students.map((s, idx) => (
+                                                    <tr key={s.id} className="border-b last:border-0">
+                                                        <td className="p-4 text-xs font-bold text-slate-300">{idx + 1}</td>
+                                                        <td className="p-4 text-sm font-bold text-slate-700">{s.name}</td>
+                                                        <td className="p-4 flex justify-center gap-2">
+                                                            {['S', 'I', 'A'].map(v => (
+                                                                <button key={v} onClick={() => setCurrentAttendance({...currentAttendance, [s.id]: currentAttendance[s.id] === v ? null : v})} className={`w-9 h-9 rounded-lg font-black border-2 transition-all ${currentAttendance[s.id] === v ? 'bg-blue-600 border-blue-600 text-white' : 'border-slate-100 text-slate-300 hover:border-blue-100'}`}>{v}</button>
+                                                            ))}
+                                                            {!currentAttendance[s.id] && <span className="text-[10px] bg-green-50 text-green-600 px-2 py-1 rounded self-center font-black border border-green-100 ml-2">HADIR</span>}
+                                                        </td>
+                                                    </tr>
+                                                ))}
                                             </tbody>
                                         </table>
+                                        <div className="p-6 bg-slate-50 text-center">
+                                            <button onClick={handleSaveAttendance} className="bg-blue-600 text-white px-10 py-3 rounded-2xl font-black shadow-lg hover:bg-blue-700 active:scale-95 transition-all">SIMPAN DATA PRESENSI</button>
+                                        </div>
                                     </div>
                                 )}
                             </div>
                         )}
 
                         {activeTab === 'rekap' && (
-                            <div className="space-y-4 animate-in fade-in duration-500">
-                                <div className="flex flex-wrap gap-4 items-center bg-white p-6 rounded-3xl border border-slate-100 shadow-sm no-print">
-                                    <div className="flex flex-wrap flex-1 gap-3">
-                                        <select value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold text-xs outline-none border border-transparent focus:border-blue-100 transition-all min-w-[150px]">
-                                            <option value="">-- Pilih Kelas --</option>
+                            <div className="space-y-4">
+                                <div className="no-print bg-white p-6 rounded-3xl border shadow-sm flex flex-wrap gap-4 items-end">
+                                    <div className="flex-1 min-w-[200px]">
+                                        <label className="text-[10px] font-black text-slate-400 block mb-2 uppercase">Pilih Kelas</label>
+                                        <select value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)} className="w-full p-3 bg-slate-50 rounded-xl font-bold border outline-none">
+                                            <option value="">-- Kelas --</option>
                                             {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                                         </select>
-                                        <select value={rekapMonth} onChange={e => setRekapMonth(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold text-xs outline-none border border-transparent focus:border-blue-100 transition-all">
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] font-black text-slate-400 block mb-2 uppercase">Bulan</label>
+                                        <select value={rekapMonth} onChange={e => setRekapMonth(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold border outline-none">
                                             {months.map((m, i) => <option key={i} value={i}>{m}</option>)}
                                         </select>
-                                        <select value={rekapYear} onChange={e => setRekapYear(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold text-xs outline-none border border-transparent focus:border-blue-100 transition-all">
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] font-black text-slate-400 block mb-2 uppercase">Tahun</label>
+                                        <select value={rekapYear} onChange={e => setRekapYear(e.target.value)} className="p-3 bg-slate-50 rounded-xl font-bold border outline-none">
                                             {years.map(y => <option key={y} value={y}>{y}</option>)}
                                         </select>
                                     </div>
-                                    <div className="flex gap-2">
-                                        <button onClick={exportToExcel} className="bg-green-600 text-white px-5 py-3 rounded-2xl text-xs font-black flex items-center gap-2 hover:bg-green-700 shadow-lg shadow-green-100 active:scale-95 transition-all"><i data-lucide="file-spreadsheet" style={{width:16}}></i> EXCEL</button>
-                                        <button onClick={() => window.print()} className="bg-slate-800 text-white px-5 py-3 rounded-2xl text-xs font-black flex items-center gap-2 hover:bg-black shadow-lg shadow-slate-100 active:scale-95 transition-all"><i data-lucide="printer" style={{width:16}}></i> CETAK</button>
-                                    </div>
+                                    <button onClick={() => window.print()} className="bg-slate-800 text-white p-3 rounded-xl hover:bg-black"><i data-lucide="printer"></i></button>
                                 </div>
+
                                 {selectedClassId && (
-                                    <div className="bg-white p-10 rounded-3xl border border-slate-100 shadow-sm overflow-x-auto">
-                                        <div className="print-only text-center mb-12 border-b-2 border-slate-800 pb-6">
-                                            <h1 className="text-3xl font-black uppercase tracking-tighter mb-1">Laporan Rekapitulasi Presensi</h1>
-                                            <p className="font-bold text-slate-600 tracking-widest uppercase text-sm">Kelas: {classes.find(c => c.id === selectedClassId)?.name} • Periode: {months[rekapMonth]} {rekapYear}</p>
+                                    <div className="bg-white p-6 rounded-3xl border shadow-sm overflow-x-auto">
+                                        <div className="print-only text-center mb-8">
+                                            <h2 className="text-xl font-black uppercase">Rekap Presensi Madrasah</h2>
+                                            <p className="text-sm font-bold text-slate-500 uppercase">Kelas: {classes.find(c => c.id === selectedClassId)?.name} | Periode: {months[rekapMonth]} {rekapYear}</p>
                                         </div>
-                                        <table className="w-full text-xs border-collapse rounded-xl overflow-hidden">
+                                        <table className="w-full text-[10px] border-collapse">
                                             <thead>
-                                                <tr className="bg-slate-800 text-white">
-                                                    <th className="p-4 text-left font-black uppercase tracking-wider">Nama Lengkap Siswa</th>
-                                                    <th className="p-4 text-center bg-orange-600 w-12 font-black">S</th>
-                                                    <th className="p-4 text-center bg-blue-600 w-12 font-black">I</th>
-                                                    <th className="p-4 text-center bg-red-600 w-12 font-black">A</th>
-                                                    <th className="p-4 text-center bg-green-600 w-24 font-black">HADIR</th>
+                                                <tr>
+                                                    <th className="border p-2 bg-slate-50 text-left" rowSpan="2">Nama Siswa</th>
+                                                    <th className="border p-2 bg-slate-50 text-center" colSpan={filteredDates.length || 1}>Tanggal Pertemuan</th>
+                                                    <th className="border p-2 bg-slate-50 text-center" colSpan="4">Total</th>
+                                                </tr>
+                                                <tr>
+                                                    {filteredDates.length > 0 ? filteredDates.map(d => (
+                                                        <th key={d} className="border p-1 bg-slate-50 text-center w-8 [writing-mode:vertical-rl] rotate-180 py-3">{new Date(d).getDate()}</th>
+                                                    )) : <th className="border p-2 bg-slate-50 text-center text-slate-300">-</th>}
+                                                    <th className="border p-1 bg-orange-50 text-orange-600">S</th>
+                                                    <th className="border p-1 bg-blue-50 text-blue-600">I</th>
+                                                    <th className="border p-1 bg-red-50 text-red-600">A</th>
+                                                    <th className="border p-1 bg-green-50 text-green-600">H</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
                                                 {classes.find(c => c.id === selectedClassId)?.students.map(s => {
                                                     let sCount = 0, iCount = 0, aCount = 0, hCount = 0;
-                                                    attendanceRecords
-                                                        .filter(r => r.classId === selectedClassId && new Date(r.date).getMonth() === parseInt(rekapMonth) && new Date(r.date).getFullYear() === parseInt(rekapYear))
-                                                        .forEach(r => {
-                                                            const stat = r.status?.[s.id];
-                                                            if(stat === 'S') sCount++; else if(stat === 'I') iCount++; else if(stat === 'A') aCount++; else hCount++;
-                                                        });
                                                     return (
-                                                        <tr key={s.id} className="border-b hover:bg-slate-50 transition-colors">
-                                                            <td className="p-4 font-bold text-slate-700">{s.name}</td>
-                                                            <td className="p-4 text-center text-orange-600 font-black bg-orange-50/30">{sCount || '-'}</td>
-                                                            <td className="p-4 text-center text-blue-600 font-black bg-blue-50/30">{iCount || '-'}</td>
-                                                            <td className="p-4 text-center text-red-600 font-black bg-red-50/30">{aCount || '-'}</td>
-                                                            <td className="p-4 text-center text-green-600 font-black bg-green-50/30">{hCount || '-'}</td>
+                                                        <tr key={s.id}>
+                                                            <td className="border p-2 font-bold text-slate-700 whitespace-nowrap">{s.name}</td>
+                                                            {filteredDates.map(d => {
+                                                                const record = attendanceRecords.find(r => r.id === `${selectedClassId}-${d}`);
+                                                                const stat = record?.status?.[s.id];
+                                                                if(stat === 'S') sCount++; else if(stat === 'I') iCount++; else if(stat === 'A') aCount++; else hCount++;
+                                                                return (
+                                                                    <td key={d} className={`border p-1 text-center font-black ${stat ? 'text-slate-800' : 'text-green-500 bg-green-50/20'}`}>{stat || '•'}</td>
+                                                                )
+                                                            })}
+                                                            {filteredDates.length === 0 && <td className="border p-2 text-center">-</td>}
+                                                            <td className="border p-1 text-center font-bold bg-orange-50/10">{sCount || '-'}</td>
+                                                            <td className="border p-1 text-center font-bold bg-blue-50/10">{iCount || '-'}</td>
+                                                            <td className="border p-1 text-center font-bold bg-red-50/10">{aCount || '-'}</td>
+                                                            <td className="border p-1 text-center font-bold bg-green-50/10">{hCount || '-'}</td>
                                                         </tr>
                                                     )
                                                 })}
                                             </tbody>
                                         </table>
-                                        <div className="print-only mt-16 grid grid-cols-2 text-center text-sm">
-                                            <div className="space-y-20">
-                                                <p className="font-bold">Kepala Madrasah,</p>
-                                                <p className="font-black underline uppercase">........................................</p>
+                                        <div className="print-only mt-12 grid grid-cols-2 text-center text-xs italic">
+                                            <div>
+                                                <p>Mengetahui,</p>
+                                                <p className="mt-20">Kepala Madrasah</p>
                                             </div>
-                                            <div className="space-y-20">
-                                                <p className="font-bold">Guru Mata Pelajaran,</p>
-                                                <p className="font-black underline uppercase">{user.displayName || '........................................'}</p>
+                                            <div>
+                                                <p>Banjarmasin, {new Date().toLocaleDateString('id-ID', {day: 'numeric', month: 'long', year: 'numeric'})}</p>
+                                                <p className="mt-20">{user.displayName || 'Guru Mata Pelajaran'}</p>
                                             </div>
                                         </div>
                                     </div>
