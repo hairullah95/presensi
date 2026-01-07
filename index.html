@@ -31,11 +31,9 @@
         body { font-family: 'Plus Jakarta Sans', sans-serif; }
         .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
-        @media print { .no-print { display: none !important; } .print-only { display: block !important; } @page { size: landscape; margin: 1cm; } }
-        .print-only { display: none; }
     </style>
 </head>
-<body class="bg-slate-50">
+<body class="bg-slate-50 text-slate-900">
     <div id="root"></div>
 
     <script type="text/babel">
@@ -61,7 +59,7 @@
 
         const App = () => {
             const [user, setUser] = useState(null);
-            const [activeTab, setActiveTab] = useState('input-siswa');
+            const [activeTab, setActiveTab] = useState('rekap');
             const [classes, setClasses] = useState([]); 
             const [attendanceRecords, setAttendanceRecords] = useState([]); 
             const [loading, setLoading] = useState(true);
@@ -158,13 +156,6 @@
                 e.target.value = null; 
             };
 
-            const saveEditedStudent = async (classId) => {
-                const target = classes.find(c => c.id === classId);
-                const updated = sortStudents(target.students.map(s => s.id === editingStudent.id ? { ...s, name: editingStudent.name } : s));
-                await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(classId).update({ students: updated });
-                setEditingStudent(null);
-            };
-
             const handleSaveAttendance = async () => {
                 if (!selectedClassId || !attendanceDate || !user) return;
                 await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('attendance').doc(`${selectedClassId}-${attendanceDate}`).set({
@@ -192,59 +183,103 @@
                 const doc = new jsPDF('l', 'mm', 'a4');
                 const selectedClass = classes.find(c => c.id === selectedClassId);
                 
-                // Header
+                // Judul
+                doc.setFont("helvetica", "bold");
                 doc.setFontSize(16);
-                doc.text('REKAP PRESENSI MADRASAH', 148, 15, { align: 'center' });
+                doc.text('REKAP PRESENSI MADRASAH', 148.5, 15, { align: 'center' });
+                
+                doc.setFont("helvetica", "normal");
                 doc.setFontSize(10);
-                doc.text(`Kelas: ${selectedClass?.name} | Periode: ${months[rekapMonth]} ${rekapYear}`, 148, 22, { align: 'center' });
+                doc.text(`Kelas: ${selectedClass?.name || '-'} | Periode: ${months[rekapMonth]} ${rekapYear}`, 148.5, 22, { align: 'center' });
 
-                // Table Data
-                const head = [
-                    ['Nama Siswa', ...filteredDates.map(d => new Date(d).getDate().toString()), 'S', 'I', 'A', 'H']
+                // Menyiapkan Header Tabel (Dua baris)
+                const headerRow1 = [
+                    { content: 'Nama Siswa', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
+                    { content: 'Tanggal Pertemuan', colSpan: filteredDates.length || 1, styles: { halign: 'center' } },
+                    { content: 'Total', colSpan: 4, styles: { halign: 'center' } }
+                ];
+                
+                const headerRow2 = [
+                    ...(filteredDates.length > 0 ? filteredDates.map(d => ({ content: new Date(d).getDate().toString(), styles: { halign: 'center' } })) : [{ content: '-', styles: { halign: 'center' } }]),
+                    { content: 'S', styles: { halign: 'center', fillColor: [255, 247, 237], textColor: [194, 65, 12] } },
+                    { content: 'I', styles: { halign: 'center', fillColor: [239, 246, 255], textColor: [29, 78, 216] } },
+                    { content: 'A', styles: { halign: 'center', fillColor: [254, 242, 242], textColor: [185, 28, 28] } },
+                    { content: 'H', styles: { halign: 'center', fillColor: [240, 253, 244], textColor: [21, 128, 61] } }
                 ];
 
-                const body = selectedClass?.students.map(s => {
+                // Menyiapkan Body Tabel
+                const tableBody = selectedClass?.students.map(s => {
                     let sCount = 0, iCount = 0, aCount = 0, hCount = 0;
                     const rowData = [s.name];
-                    filteredDates.forEach(d => {
-                        const record = attendanceRecords.find(r => r.id === `${selectedClassId}-${d}`);
-                        const stat = record?.status?.[s.id];
-                        if(stat === 'S') sCount++; else if(stat === 'I') iCount++; else if(stat === 'A') aCount++; else hCount++;
-                        rowData.push(stat || 'H');
-                    });
-                    rowData.push(sCount, iCount, aCount, hCount);
+                    
+                    if (filteredDates.length > 0) {
+                        filteredDates.forEach(d => {
+                            const record = attendanceRecords.find(r => r.id === `${selectedClassId}-${d}`);
+                            const stat = record?.status?.[s.id];
+                            if(stat === 'S') { sCount++; rowData.push('S'); }
+                            else if(stat === 'I') { iCount++; rowData.push('I'); }
+                            else if(stat === 'A') { aCount++; rowData.push('A'); }
+                            else { hCount++; rowData.push('•'); } // Simbol titik untuk hadir sesuai UI
+                        });
+                    } else {
+                        rowData.push('-');
+                    }
+
+                    rowData.push(sCount || '-', iCount || '-', aCount || '-', hCount || '-');
                     return rowData;
                 });
 
                 doc.autoTable({
-                    head: head,
-                    body: body,
+                    head: [headerRow1, headerRow2],
+                    body: tableBody,
                     startY: 30,
                     theme: 'grid',
-                    styles: { fontSize: 8, cellPadding: 2 },
-                    headStyles: { fillColor: [59, 130, 246], halign: 'center' },
-                    columnStyles: { 0: { fontStyle: 'bold' } }
+                    styles: { fontSize: 8, font: 'helvetica', cellPadding: 2, lineWidth: 0.1, lineColor: [200, 200, 200] },
+                    headStyles: { fillColor: [248, 250, 252], textColor: [51, 65, 85], fontStyle: 'bold' },
+                    columnStyles: {
+                        0: { fontStyle: 'bold', cellWidth: 50 }
+                    },
+                    didParseCell: function(data) {
+                        // Memberi warna khusus pada kolom total seperti di UI
+                        if (data.section === 'body' && data.column.index > filteredDates.length) {
+                             if (data.column.index === filteredDates.length + 1) data.cell.styles.fillColor = [255, 253, 250];
+                             if (data.column.index === filteredDates.length + 2) data.cell.styles.fillColor = [250, 252, 255];
+                             if (data.column.index === filteredDates.length + 3) data.cell.styles.fillColor = [255, 250, 250];
+                             if (data.column.index === filteredDates.length + 4) data.cell.styles.fillColor = [250, 255, 250];
+                             data.cell.styles.halign = 'center';
+                        }
+                        if (data.section === 'body' && data.column.index > 0 && data.column.index <= filteredDates.length) {
+                            data.cell.styles.halign = 'center';
+                        }
+                    }
                 });
 
-                // Footer / Tanda Tangan
+                // Tanda Tangan
                 const finalY = doc.lastAutoTable.finalY + 15;
                 const pageWidth = doc.internal.pageSize.getWidth();
+                const today = new Date().toLocaleDateString('id-ID', {day: 'numeric', month: 'long', year: 'numeric'});
                 
-                doc.text(`........, ${new Date().toLocaleDateString('id-ID', {day: 'numeric', month: 'long', year: 'numeric'})}`, pageWidth - 60, finalY);
+                doc.setFontSize(9);
                 
-                doc.text('Mengetahui,', 40, finalY + 10);
-                doc.text('Kepala Madrasah', 40, finalY + 15);
+                // Kiri (Kepala Madrasah)
+                doc.text('Mengetahui,', 40, finalY);
+                doc.setFont("helvetica", "bold");
+                doc.text('Kepala Madrasah', 40, finalY + 5);
                 
-                doc.text('Guru Mata Pelajaran', pageWidth - 60, finalY + 15);
+                doc.setFont("helvetica", "normal");
+                doc.line(40, finalY + 30, 90, finalY + 30); // Garis nama
+                doc.text('NIP.', 40, finalY + 35);
 
-                // Space for signature
-                doc.text('__________________________', 40, finalY + 45);
-                doc.text('NIP.', 40, finalY + 50);
+                // Kanan (Guru Mapel)
+                doc.text(`........, ${today}`, pageWidth - 90, finalY);
+                doc.setFont("helvetica", "bold");
+                doc.text('Guru Mata Pelajaran', pageWidth - 90, finalY + 5);
+                
+                doc.setFont("helvetica", "normal");
+                doc.line(pageWidth - 90, finalY + 30, pageWidth - 40, finalY + 30); // Garis nama
+                doc.text('NIP.', pageWidth - 90, finalY + 35);
 
-                doc.text('__________________________', pageWidth - 60, finalY + 45);
-                doc.text('NIP.', pageWidth - 60, finalY + 50);
-
-                doc.save(`Rekap_Presensi_${selectedClass?.name}_${months[rekapMonth]}.pdf`);
+                doc.save(`Rekap_Presensi_${selectedClass?.name || 'Kelas'}_${months[rekapMonth]}.pdf`);
             };
 
             if (loading) return <div className="h-screen flex items-center justify-center">Memuat...</div>;
@@ -261,7 +296,7 @@
             return (
                 <div className="min-h-screen p-4 md:p-8">
                     <div className="max-w-6xl mx-auto">
-                        <header className="mb-8 flex flex-col md:flex-row items-center justify-between gap-4 no-print bg-white p-4 rounded-3xl shadow-sm border">
+                        <header className="mb-8 flex flex-col md:flex-row items-center justify-between gap-4 bg-white p-4 rounded-3xl shadow-sm border">
                             <h1 className="text-xl font-black text-blue-600 uppercase">Presensi Digital</h1>
                             <div className="flex bg-slate-100 p-1 rounded-2xl items-center text-xs font-bold">
                                 <button onClick={() => setActiveTab('input-siswa')} className={`px-4 py-2 rounded-xl ${activeTab === 'input-siswa' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>SISWA</button>
@@ -298,28 +333,16 @@
                                                 {cls.students.map((s, idx) => (
                                                     <div key={s.id} className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg group">
                                                         <span className="text-[10px] font-bold text-slate-300 w-4">{idx + 1}</span>
-                                                        {editingStudent?.id === s.id ? (
-                                                            <div className="flex-1 flex gap-2">
-                                                                <input autoFocus className="flex-1 border-b border-blue-500 outline-none text-sm font-bold" value={editingStudent.name} onChange={e => setEditingStudent({...editingStudent, name: e.target.value})} onKeyPress={e => e.key === 'Enter' && saveEditedStudent(cls.id)} />
-                                                                <button onClick={() => saveEditedStudent(cls.id)} className="text-green-500"><i data-lucide="check" style={{width:14}}></i></button>
-                                                            </div>
-                                                        ) : (
-                                                            <>
-                                                                <span className="flex-1 text-sm font-bold text-slate-600">{s.name}</span>
-                                                                <div className="opacity-0 group-hover:opacity-100 flex gap-2">
-                                                                    <button onClick={() => setEditingStudent(s)} className="text-slate-400 hover:text-blue-500"><i data-lucide="edit-2" style={{width:14}}></i></button>
-                                                                    <button onClick={async () => {
-                                                                        const updated = cls.students.filter(st => st.id !== s.id);
-                                                                        await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(cls.id).update({ students: updated });
-                                                                    }} className="text-slate-400 hover:text-red-500"><i data-lucide="x" style={{width:14}}></i></button>
-                                                                </div>
-                                                            </>
-                                                        )}
+                                                        <span className="flex-1 text-sm font-bold text-slate-600">{s.name}</span>
+                                                        <button onClick={async () => {
+                                                            const updated = cls.students.filter(st => st.id !== s.id);
+                                                            await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(cls.id).update({ students: updated });
+                                                        }} className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500"><i data-lucide="x" style={{width:14}}></i></button>
                                                     </div>
                                                 ))}
                                             </div>
                                             <div className="p-4 border-t bg-slate-50/50 flex gap-2">
-                                                <input type="text" placeholder="Tambah Siswa Manual..." value={selectedClassId === cls.id ? newStudentName : ''} onChange={e => {setSelectedClassId(cls.id); setNewStudentName(e.target.value)}} className="flex-1 p-2 bg-white rounded-lg text-sm font-bold outline-none border" onKeyPress={e => e.key === 'Enter' && addStudent(cls.id)} />
+                                                <input type="text" placeholder="Tambah Siswa..." value={selectedClassId === cls.id ? newStudentName : ''} onChange={e => {setSelectedClassId(cls.id); setNewStudentName(e.target.value)}} className="flex-1 p-2 bg-white rounded-lg text-sm font-bold outline-none border" onKeyPress={e => e.key === 'Enter' && addStudent(cls.id)} />
                                                 <button onClick={() => addStudent(cls.id)} className="bg-slate-800 text-white p-2 rounded-lg"><i data-lucide="plus" style={{width:18}}></i></button>
                                             </div>
                                         </div>
@@ -364,7 +387,7 @@
                                             </tbody>
                                         </table>
                                         <div className="p-6 bg-slate-50 text-center">
-                                            <button onClick={handleSaveAttendance} className="bg-blue-600 text-white px-10 py-3 rounded-2xl font-black shadow-lg hover:bg-blue-700 active:scale-95 transition-all">SIMPAN DATA PRESENSI</button>
+                                            <button onClick={handleSaveAttendance} className="bg-blue-600 text-white px-10 py-3 rounded-2xl font-black shadow-lg hover:bg-blue-700 active:scale-95 transition-all uppercase tracking-wide">Simpan Presensi</button>
                                         </div>
                                     </div>
                                 )}
@@ -373,7 +396,7 @@
 
                         {activeTab === 'rekap' && (
                             <div className="space-y-4">
-                                <div className="no-print bg-white p-6 rounded-3xl border shadow-sm flex flex-wrap gap-4 items-end">
+                                <div className="bg-white p-6 rounded-3xl border shadow-sm flex flex-wrap gap-4 items-end">
                                     <div className="flex-1 min-w-[200px]">
                                         <label className="text-[10px] font-black text-slate-400 block mb-2 uppercase">Pilih Kelas</label>
                                         <select value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)} className="w-full p-3 bg-slate-50 rounded-xl font-bold border outline-none">
@@ -399,21 +422,21 @@
                                 </div>
 
                                 {selectedClassId && (
-                                    <div id="rekap-table-container" className="bg-white p-6 rounded-3xl border shadow-sm overflow-x-auto">
-                                        <div className="text-center mb-8">
+                                    <div className="bg-white p-8 rounded-3xl border shadow-sm overflow-x-auto">
+                                        <div className="text-center mb-10">
                                             <h2 className="text-xl font-black uppercase">Rekap Presensi Madrasah</h2>
                                             <p className="text-sm font-bold text-slate-500 uppercase">Kelas: {classes.find(c => c.id === selectedClassId)?.name} | Periode: {months[rekapMonth]} {rekapYear}</p>
                                         </div>
                                         <table className="w-full text-[10px] border-collapse">
                                             <thead>
                                                 <tr>
-                                                    <th className="border p-2 bg-slate-50 text-left" rowSpan="2">Nama Siswa</th>
-                                                    <th className="border p-2 bg-slate-50 text-center" colSpan={filteredDates.length || 1}>Tanggal Pertemuan</th>
-                                                    <th className="border p-2 bg-slate-50 text-center" colSpan="4">Total</th>
+                                                    <th className="border p-2 bg-slate-50 text-left font-bold" rowSpan="2">Nama Siswa</th>
+                                                    <th className="border p-2 bg-slate-50 text-center font-bold" colSpan={filteredDates.length || 1}>Tanggal Pertemuan</th>
+                                                    <th className="border p-2 bg-slate-50 text-center font-bold" colSpan="4">Total</th>
                                                 </tr>
                                                 <tr>
                                                     {filteredDates.length > 0 ? filteredDates.map(d => (
-                                                        <th key={d} className="border p-1 bg-slate-50 text-center w-8 [writing-mode:vertical-rl] rotate-180 py-3">{new Date(d).getDate()}</th>
+                                                        <th key={d} className="border p-1 bg-slate-50 text-center w-8 py-3">{new Date(d).getDate()}</th>
                                                     )) : <th className="border p-2 bg-slate-50 text-center text-slate-300">-</th>}
                                                     <th className="border p-1 bg-orange-50 text-orange-600">S</th>
                                                     <th className="border p-1 bg-blue-50 text-blue-600">I</th>
@@ -446,19 +469,18 @@
                                             </tbody>
                                         </table>
                                         
-                                        {/* Preview of signatures in UI */}
-                                        <div className="mt-12 grid grid-cols-2 text-center text-xs italic">
+                                        <div className="mt-16 grid grid-cols-2 text-center text-[10px] leading-relaxed">
                                             <div>
                                                 <p>Mengetahui,</p>
-                                                <p className="mt-2 text-sm font-bold not-italic">Kepala Madrasah</p>
-                                                <div className="mt-16 border-t border-slate-400 w-48 mx-auto"></div>
-                                                <p className="text-left ml-24">NIP.</p>
+                                                <p className="font-bold text-sm">Kepala Madrasah</p>
+                                                <div className="mt-16 border-t border-slate-900 w-48 mx-auto"></div>
+                                                <p className="text-left w-48 mx-auto">NIP.</p>
                                             </div>
                                             <div>
                                                 <p>........, {new Date().toLocaleDateString('id-ID', {day: 'numeric', month: 'long', year: 'numeric'})}</p>
-                                                <p className="mt-2 text-sm font-bold not-italic">Guru Mata Pelajaran</p>
-                                                <div className="mt-16 border-t border-slate-400 w-48 mx-auto"></div>
-                                                <p className="text-left ml-24">NIP.</p>
+                                                <p className="font-bold text-sm">Guru Mata Pelajaran</p>
+                                                <div className="mt-16 border-t border-slate-900 w-48 mx-auto"></div>
+                                                <p className="text-left w-48 mx-auto">NIP.</p>
                                             </div>
                                         </div>
                                     </div>
