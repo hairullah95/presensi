@@ -10,6 +10,9 @@
     <script src="https://unpkg.com/lucide@latest"></script>
     <!-- XLSX Library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- jsPDF & autoTable for PDF Export -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
     
     <!-- React & ReactDOM -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -29,7 +32,7 @@
         .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
         @media print { .no-print { display: none !important; } .print-only { display: block !important; } @page { size: landscape; margin: 1cm; } }
-        .print-only { display: block !important; }
+        .print-only { display: none; }
     </style>
 </head>
 <body class="bg-slate-50">
@@ -104,7 +107,6 @@
                 if (window.lucide) window.lucide.createIcons();
             }, [activeTab, user, loading, selectedClassId, editingStudent]);
 
-            // Load existing attendance into state when class/date changes
             useEffect(() => {
                 const recordId = `${selectedClassId}-${attendanceDate}`;
                 const existing = attendanceRecords.find(r => r.id === recordId);
@@ -153,7 +155,7 @@
                     await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('classes').doc(classId).update({ students: updated });
                 };
                 reader.readAsBinaryString(file);
-                e.target.value = null; // reset
+                e.target.value = null; 
             };
 
             const saveEditedStudent = async (classId) => {
@@ -174,7 +176,6 @@
                 alert('Presensi berhasil disimpan!');
             };
 
-            // Filter for Rekap
             const filteredDates = useMemo(() => {
                 const dates = attendanceRecords
                     .filter(r => r.classId === selectedClassId)
@@ -185,6 +186,66 @@
                     });
                 return [...new Set(dates)].sort();
             }, [attendanceRecords, selectedClassId, rekapMonth, rekapYear]);
+
+            const exportPDF = () => {
+                const { jsPDF } = window.jspdf;
+                const doc = new jsPDF('l', 'mm', 'a4');
+                const selectedClass = classes.find(c => c.id === selectedClassId);
+                
+                // Header
+                doc.setFontSize(16);
+                doc.text('REKAP PRESENSI MADRASAH', 148, 15, { align: 'center' });
+                doc.setFontSize(10);
+                doc.text(`Kelas: ${selectedClass?.name} | Periode: ${months[rekapMonth]} ${rekapYear}`, 148, 22, { align: 'center' });
+
+                // Table Data
+                const head = [
+                    ['Nama Siswa', ...filteredDates.map(d => new Date(d).getDate().toString()), 'S', 'I', 'A', 'H']
+                ];
+
+                const body = selectedClass?.students.map(s => {
+                    let sCount = 0, iCount = 0, aCount = 0, hCount = 0;
+                    const rowData = [s.name];
+                    filteredDates.forEach(d => {
+                        const record = attendanceRecords.find(r => r.id === `${selectedClassId}-${d}`);
+                        const stat = record?.status?.[s.id];
+                        if(stat === 'S') sCount++; else if(stat === 'I') iCount++; else if(stat === 'A') aCount++; else hCount++;
+                        rowData.push(stat || 'H');
+                    });
+                    rowData.push(sCount, iCount, aCount, hCount);
+                    return rowData;
+                });
+
+                doc.autoTable({
+                    head: head,
+                    body: body,
+                    startY: 30,
+                    theme: 'grid',
+                    styles: { fontSize: 8, cellPadding: 2 },
+                    headStyles: { fillColor: [59, 130, 246], halign: 'center' },
+                    columnStyles: { 0: { fontStyle: 'bold' } }
+                });
+
+                // Footer / Tanda Tangan
+                const finalY = doc.lastAutoTable.finalY + 15;
+                const pageWidth = doc.internal.pageSize.getWidth();
+                
+                doc.text(`........, ${new Date().toLocaleDateString('id-ID', {day: 'numeric', month: 'long', year: 'numeric'})}`, pageWidth - 60, finalY);
+                
+                doc.text('Mengetahui,', 40, finalY + 10);
+                doc.text('Kepala Madrasah', 40, finalY + 15);
+                
+                doc.text('Guru Mata Pelajaran', pageWidth - 60, finalY + 15);
+
+                // Space for signature
+                doc.text('__________________________', 40, finalY + 45);
+                doc.text('NIP.', 40, finalY + 50);
+
+                doc.text('__________________________', pageWidth - 60, finalY + 45);
+                doc.text('NIP.', pageWidth - 60, finalY + 50);
+
+                doc.save(`Rekap_Presensi_${selectedClass?.name}_${months[rekapMonth]}.pdf`);
+            };
 
             if (loading) return <div className="h-screen flex items-center justify-center">Memuat...</div>;
 
@@ -332,12 +393,14 @@
                                             {years.map(y => <option key={y} value={y}>{y}</option>)}
                                         </select>
                                     </div>
-                                    <button onClick={() => window.print()} className="bg-slate-800 text-white p-3 rounded-xl hover:bg-black"><i data-lucide="printer"></i></button>
+                                    <button onClick={exportPDF} className="bg-blue-600 text-white p-3 rounded-xl hover:bg-blue-700 flex items-center gap-2 font-bold px-6">
+                                        <i data-lucide="file-text" style={{width:18}}></i> EKSPOR PDF
+                                    </button>
                                 </div>
 
                                 {selectedClassId && (
-                                    <div className="bg-white p-6 rounded-3xl border shadow-sm overflow-x-auto">
-                                        <div className="print-only text-center mb-8">
+                                    <div id="rekap-table-container" className="bg-white p-6 rounded-3xl border shadow-sm overflow-x-auto">
+                                        <div className="text-center mb-8">
                                             <h2 className="text-xl font-black uppercase">Rekap Presensi Madrasah</h2>
                                             <p className="text-sm font-bold text-slate-500 uppercase">Kelas: {classes.find(c => c.id === selectedClassId)?.name} | Periode: {months[rekapMonth]} {rekapYear}</p>
                                         </div>
@@ -382,14 +445,20 @@
                                                 })}
                                             </tbody>
                                         </table>
-                                        <div className="print-only mt-12 grid grid-cols-2 text-center text-xs italic">
+                                        
+                                        {/* Preview of signatures in UI */}
+                                        <div className="mt-12 grid grid-cols-2 text-center text-xs italic">
                                             <div>
                                                 <p>Mengetahui,</p>
-                                                <p className="mt-20">Kepala Madrasah</p>
+                                                <p className="mt-2 text-sm font-bold not-italic">Kepala Madrasah</p>
+                                                <div className="mt-16 border-t border-slate-400 w-48 mx-auto"></div>
+                                                <p className="text-left ml-24">NIP.</p>
                                             </div>
                                             <div>
-                                                <p>Banjarmasin, {new Date().toLocaleDateString('id-ID', {day: 'numeric', month: 'long', year: 'numeric'})}</p>
-                                                <p className="mt-20">{user.displayName || 'Guru Mata Pelajaran'}</p>
+                                                <p>........, {new Date().toLocaleDateString('id-ID', {day: 'numeric', month: 'long', year: 'numeric'})}</p>
+                                                <p className="mt-2 text-sm font-bold not-italic">Guru Mata Pelajaran</p>
+                                                <div className="mt-16 border-t border-slate-400 w-48 mx-auto"></div>
+                                                <p className="text-left ml-24">NIP.</p>
                                             </div>
                                         </div>
                                     </div>
